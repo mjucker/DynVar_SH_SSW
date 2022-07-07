@@ -1,5 +1,7 @@
 import xarray as xr
 from tabulate import tabulate
+import pandas as pd
+import numpt as np
 
 
 seasons = {'JJASON':[6,11],'JJA':[6,8],'SON':[9,11]}
@@ -132,7 +134,7 @@ for season,months in seasons.items():
     for var in invert_quants.keys():
         vstats = []
         for perc in quants:
-            stats = DetectMinMaxPeriods(ds['_'.join(var.split(' '))],percentiles[season][var][perc],sep=20,period=7,kind=minmax[var])
+            stats = DetectMinMaxPeriods(ds['_'.join(var.split(' '))],percentiles[season][var][perc],sep=event_sep,period=roll,kind=minmax[var])
             stats['percentile'] = perc
             vstats.append(stats)
         vstats = xr.concat(vstats,dim='percentile')
@@ -142,4 +144,81 @@ for season,months in seasons.items():
     sstats['season'] = season
     events.append(sstats)
 events = xr.concat(events,dim='season')
+del events.attrs['variable']
+events.attrs['method'] = 'individual {0}-day periods below/above given percentiles. Events are considered the same if spaced by less than {1} days'.format(roll,event_sep)
+
+## Now get some statistics
+# get the onset dates for each season, definition, and threshold
+
+# we want to align everything so that similar dates are 
+#  assigned to similar event ids
+def FindUniqueEvents(events,event_sep):
+    '''
+      Returns a list of all events which happen within event_sep days of each other.
+       This is across seasons, detection methods, and percentiles.
+
+    INPUTS:
+       events: xr.Dataset constructed as per above code.
+       event_sep: time interval within which two events are considered the same.
+    OUTPUTS:
+       unique_events: list of onset dates of unique events
+    '''
+    all_events = []
+    for season in events.season.values:
+        for var in events.variable.values:
+            for perc in events.percentile.values:
+                all_events = all_events + [e for e in events.sel(season=season,variable=var,percentile=perc,dates='start').event_dates.values if np.isfinite(e)]
+    all_events = np.unique(all_events)
+    # we now have a list of unique event times
+    # need to merge events which happen within event_sep days
+    check_different = np.diff(all_events) > event_sep*np.timedelta64(1,'D')
+    unique_events = all_events[[True]+list(check_different)]
+    return unique_events
+
+def AssignUniqueEvent(events,unique_events):
+    '''
+    Assigns given events to a list of unique events based on shortest distance.
+    
+    INPUTS:
+      events: a list of events - these are time arrays
+      unique_events: a list of unique events to which events are attributed to. also a list of time events
+    OUTPUTS:
+      indx: indices which map events to unique_events such that unique_events[indx] <=> events
+    '''
+    indx = []
+    for event in events:
+        if np.isfinite(event):
+            diffs = unique_events - event
+            indx.append(np.argmin(np.abs(diffs)))
+    return np.array(indx)
+
+unique_events = FindUniqueEvents(events,event_sep)
+nevents = len(unique_events)
+
+# then, assign an event id to each individual event
+s_dates = []
+for season in events.season.values:
+    date_cols = []
+    for var in events.variable.values:
+        short_var = ''.join([c[0] for c in var.split()]).upper()
+        for perc in events.percentile.values:
+            head = '\n'.join([season,short_var,str(perc)])
+            dates = events.sel(season=season,variable=var,percentile=perc,dates='start').event_dates.values
+            event_ids = AssignUniqueEvent(dates,unique_events)
+            fins = np.isfinite(dates)
+            dates = pd.to_datetime(dates[fins]).strftime('%Y-%b-%d')
+            dates_v = ['-']*nevents
+            for d,e in enumerate(event_ids):
+                dates_v[e] = dates[d]
+            dx = xr.DataArray(dates_v,coords=[('event',np.arange(nevents))],name=head)
+            date_cols.append(dx)
+    season_dates = xr.merge(date_cols)
+    # now print this as a latex table as well
+    print(tabulate(season_dates.to_dataframe(),headers='keys',showindex=False,tablefmt='latex_longtable'))
+    print('\clearpage')
+    s_dates.append(season_dates)
+all_dates = xr.merge(s_dates)
+
+##
+# Next, we want to construct histograms with number of events by method
 
