@@ -1,7 +1,8 @@
 import xarray as xr
 from tabulate import tabulate
 import pandas as pd
-import numpt as np
+import numpy as np
+import seaborn as sns
 
 
 seasons = {'JJASON':[6,11],'JJA':[6,8],'SON':[9,11]}
@@ -104,22 +105,25 @@ def DetectMinMaxPeriods(ds,thresh,sep=20,period=7,time='time',kind='max'):
     unique_events = np.unique(ex)
     duration = []
     extreme  = []
-    se_dates = []
+    start_dates = []
+    end_dates = []
     for ue in unique_events:
         filtr = ex == ue
         prev_date = ex.isel(time=filtr).time[0].values-7*timestep
         end_date  = ex.isel(time=filtr).time[-1].values
-        se_dates.append([prev_date.values,end_date])
+        start_dates.append(prev_date.values)
+        end_dates.append(end_date)
         duration.append(period+sum(filtr.values)-1)
         if kind == 'min':
             extreme.append(ds.sel(time=slice(prev_date,end_date)).min().values)
         elif kind == 'max':
             extreme.append(ds.sel(time=slice(prev_date,end_date)).max().values)
     unicord = [('event',unique_events)]
-    onx  = xr.DataArray(se_dates,coords=unicord+[('dates',['start','end'])],name='event_dates')
+    onx  = xr.DataArray(start_dates,coords=unicord,name='onset_date')
+    edx  = xr.DataArray(end_dates,coords=unicord,name='end_date')
     durx = xr.DataArray(duration,coords=unicord,name='duration')
     extx = xr.DataArray(extreme,coords=unicord,name='extreme_value')
-    outx = xr.merge([durx,extx,onx])
+    outx = xr.merge([durx,extx,onx,edx])
     outx.attrs['variable'] = ds.name
     options = {'max':'above','min':'below'}
     outx.attrs['method'] = 'individual {0}-day periods {1} {2}. Events are considered the same if spaced by less than {3} days'.format(period,options[kind],thresh,sep)
@@ -167,7 +171,7 @@ def FindUniqueEvents(events,event_sep):
     for season in events.season.values:
         for var in events.variable.values:
             for perc in events.percentile.values:
-                all_events = all_events + [e for e in events.sel(season=season,variable=var,percentile=perc,dates='start').event_dates.values if np.isfinite(e)]
+                all_events = all_events + [e for e in events.sel(season=season,variable=var,percentile=perc).onset_date.values if np.isfinite(e)]
     all_events = np.unique(all_events)
     # we now have a list of unique event times
     # need to merge events which happen within event_sep days
@@ -203,7 +207,7 @@ for season in events.season.values:
         short_var = ''.join([c[0] for c in var.split()]).upper()
         for perc in events.percentile.values:
             head = '\n'.join([season,short_var,str(perc)])
-            dates = events.sel(season=season,variable=var,percentile=perc,dates='start').event_dates.values
+            dates = events.sel(season=season,variable=var,percentile=perc).onset_date.values
             event_ids = AssignUniqueEvent(dates,unique_events)
             fins = np.isfinite(dates)
             dates = pd.to_datetime(dates[fins]).strftime('%Y-%b-%d')
@@ -221,4 +225,65 @@ all_dates = xr.merge(s_dates)
 
 ##
 # Next, we want to construct histograms with number of events by method
+#def SumDates(da,axis=None):
+#    ln = len(da)
+#    if ln == 0:
+#        return 0
+#    empty = np.sum(da == '-')
+#    return ln-empty
+#
+#def CreateSumArrays(ds):
+#    sums = ds.reduce(SumDates)
+#    dims = []
+#    vals = []
+#    for var in sums.data_vars:
+#        dims.append(var)
+#        vals.append(sums[var].values)
+#    return xr.DataArray(vals,coords=[('data',dims)],name='totals')
 
+# create rolling decade statistic on the number of events
+#  this allows for error bars
+dec_stat = []
+for yr in range(1979,2013):
+    filtr = (events.onset_date.dt.year >= yr)*(events.onset_date.dt.year < yr+10)
+    reduced = events.where(filtr).reduce(np.isfinite).onset_date.sum('event')
+    reduced = reduced.assign_coords({'season':events.season,'variable':events.variable,'percentile':events.percentile})
+    reduced['decade'] = str(yr)+'-'+str(yr+9)
+    dec_stat.append(reduced)
+dec_stat = xr.concat(dec_stat,dim='decade')
+dec_stat.name = 'events per decade'
+# now convert this into individual columns for a DataFrame
+dec_stat_cols = {}
+for season in dec_stat['season'].values:
+    for var in dec_stat['variable'].values:
+        short_var = ''.join([c[0] for c in var.split()]).upper()
+        for perc in dec_stat['percentile'].values:
+            head = '\n'.join([season,short_var,str(perc)])
+            dec_stat_cols[head] = dec_stat.sel(season=season,variable=var,percentile=perc).values
+dec_stat_cols = pd.DataFrame(dec_stat_cols)
+
+# plot the stats
+colors = sns.color_palette()
+hatches = ['','//','--']*3
+#hatches = ["*", "/", "o", "x"]
+decors = {'var':{},'perc':{}}
+for v,var in enumerate(dec_stat['variable'].values):
+    short_var = ''.join([c[0] for c in var.split()]).upper()
+    decors['var'][short_var] = colors[v]
+for c,perc in enumerate(dec_stat['percentile'].values):
+    decors['perc'][str(perc)] = hatches[c]
+g = sns.barplot(data=dec_stat_cols)
+for l,label in enumerate(g.axes.get_xticklabels()):
+    txt = label.get_text()
+    season,var,perc = txt.split('\n')
+    g.patches[l].set_facecolor(decors['var'][var])
+    g.patches[l].set_hatch(decors['perc'][perc])
+ax = g.axes
+fig= g.figure
+sns.despine(ax=ax,offset=10)
+ax.set_title('event frequency [#/decade]')
+ax.set_ylabel('# events per decade')
+fig.set_figwidth(fig.get_figwidth()*1.4)
+outFile = 'figures/events_per_decade.pdf'
+fig.savefig(outFile,transparent=True,bbox_inches='tight')
+print(outFile)
