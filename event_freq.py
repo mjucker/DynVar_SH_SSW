@@ -3,9 +3,12 @@ from tabulate import tabulate
 import pandas as pd
 import numpy as np
 import seaborn as sns
+import os
 
 
 seasons = {'JJASON':[6,11],'JJA':[6,8],'SON':[9,11]}
+# only need to write onset dates of longest season
+write_season = 'JJASON'
 
 quants = [0.10,0.05]
 
@@ -24,7 +27,7 @@ roll = 7
 
 event_sep = 20
 
-vxmoms = xr.open_mfdataset('vxmoms/ERA5_vxmoms_*_{0}hPa_{1}km.nc'.format(10,30.5))
+vxmoms = xr.open_mfdataset('vxmoms/ERA5_vxmoms_*_{0}hPa_{1}km.nc'.format(level,edge))
 vxmoms.load()
 
 percentiles = {}
@@ -126,9 +129,16 @@ def DetectMinMaxPeriods(ds,thresh,sep=20,period=7,time='time',kind='max'):
     outx = xr.merge([durx,extx,onx,edx])
     outx.attrs['variable'] = ds.name
     options = {'max':'above','min':'below'}
-    outx.attrs['method'] = 'individual {0}-day periods {1} {2}. Events are considered the same if spaced by less than {3} days'.format(period,options[kind],thresh,sep)
+    outx.attrs['method'] = 'individual {0}-day periods of {4} {1} {2}. Events are considered the same if spaced by less than {3} days'.format(period,options[kind],thresh,sep,ds.name)
     return outx 
 
+def WriteCSV(ds,init_text,filename):
+    import os
+    with open(filename,'w') as csvfile:
+        csvfile.write(init_text)
+        for event in ds.onset_date:
+            csvfile.writelines(str(event.dt.strftime('%Y,%m,%d').values)+os.linesep)
+    print(filename)
 
 events = []
 for season,months in seasons.items():
@@ -141,6 +151,11 @@ for season,months in seasons.items():
             stats = DetectMinMaxPeriods(ds['_'.join(var.split(' '))],percentiles[season][var][perc],sep=event_sep,period=roll,kind=minmax[var])
             stats['percentile'] = perc
             vstats.append(stats)
+            # write the CSV file
+            if season == write_season:
+                init_txt = '# Vortex moment definition: geopotential height at {0} hPa, vortex edge = {1} km'.format(level,edge)+os.linesep
+                init_txt += '# '+stats.attrs['method']+os.linesep
+                WriteCSV(stats,init_txt,'csv/onset_dates_vxmoms_{0}_{1}_{2}hPa_{3}km_q{4}.csv'.format('_'.join(var.split(' ')),season,level,edge,perc))
         vstats = xr.concat(vstats,dim='percentile')
         vstats['variable'] = var
         sstats.append(vstats)
